@@ -4,7 +4,13 @@ Home Assistant control and monitoring for the eight-channel Lion IRVT battery
 tester (TIDA-010086 + ESP32 proxy).
 
 Written for someone installing and operating this, not for someone reading the
-firmware. The wire-level contracts live in [`../Docs/`](../Docs/).
+firmware. The wire-level contracts live in the hardware repository's
+[`Docs/`](https://github.com/ArakniD/Lion-IRVT/tree/master/Hardware/source/Docs).
+
+This repository is also checked out as the `lion-lvrt-integration` submodule
+of [Lion-IRVT](https://github.com/ArakniD/Lion-IRVT), beside the firmware it
+mirrors. It installs and runs on its own; only the header cross-checks in the
+test suite need the firmware alongside (see [Testing](#testing)).
 
 ---
 
@@ -144,7 +150,7 @@ Worth knowing before you file one:
 
 ## Calibration
 
-The bench procedure is in [`../Docs/calibration-flow.md`](../Docs/calibration-flow.md).
+The bench procedure is in [`calibration-flow.md`](https://github.com/ArakniD/Lion-IRVT/tree/master/Hardware/source/Docs/calibration-flow.md).
 From Home Assistant, each step is one service call that returns the live
 telemetry, so you can watch a bench supply land inside the capture window:
 
@@ -181,6 +187,21 @@ simulator deliberately reproduces the behaviours that break clients: the shared
 slot-select cursor, exact write-length checks, refusals that carry no reason,
 read-only register writes that are silently dropped, MTU truncation, and the
 host watchdog.
+
+The layout tests compare the Python codecs against the firmware's own C
+headers - `registers.h` on the C2000 and `ble_proto.h` / `bts_regs.h` on the
+ESP32. They find them in this order:
+
+1. `LION_IRVT_SOURCE`, if set, naming a Lion-IRVT `Hardware/source` checkout.
+2. The parent directory, which is right when this is the submodule.
+
+With neither, those tests **skip** and say where they looked. A standalone
+clone therefore passes with them skipped - so run the full suite from the
+submodule, or set the variable, before trusting a change to a wire format:
+
+```bash
+LION_IRVT_SOURCE=../Lion-IRVT/Hardware/source python -m pytest
+```
 
 Two tiers:
 

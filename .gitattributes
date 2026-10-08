@@ -1,0 +1,3 @@
+# Auto detect text files and normalise to LF in the repository, matching
+# the Lion-IRVT repo this was split from.
+* text=auto

@@ -9,6 +9,7 @@ because a test that builds objects directly never serialises a byte.
 
 from __future__ import annotations
 
+import os
 import re
 import struct
 from pathlib import Path
@@ -24,9 +25,24 @@ from custom_components.lion_lvrt.const import (
 )
 from custom_components.lion_lvrt.protocol import ble as proto
 
-#: The firmware header, relative to the repository root.
+
+
+def _firmware_root() -> Path:
+    """Where the firmware headers this suite checks against live.
+
+    ``LION_IRVT_SOURCE`` names a Lion-IRVT ``Hardware/source`` checkout. Without
+    it, the parent of this repository is used, which is right when it is
+    checked out as the ``lion-lvrt-integration`` submodule of Lion-IRVT. In a
+    standalone clone neither exists and the header checks skip, saying where
+    they looked.
+    """
+    env = os.environ.get("LION_IRVT_SOURCE")
+    return Path(env) if env else Path(__file__).resolve().parents[2]
+
+
+#: The firmware header, relative to the Lion-IRVT source root.
 HEADER = (
-    Path(__file__).resolve().parents[2]
+    _firmware_root()
     / "esp32-btle-proxy"
     / "components"
     / "ble_svc"

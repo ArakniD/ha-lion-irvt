@@ -10,6 +10,7 @@ have provably drifted.
 
 from __future__ import annotations
 
+import os
 import re
 import struct
 from pathlib import Path
@@ -18,7 +19,22 @@ import pytest
 
 from custom_components.lion_lvrt.protocol import registers as regs
 
-SOURCE_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _firmware_root() -> Path:
+    """Where the firmware headers this suite checks against live.
+
+    ``LION_IRVT_SOURCE`` names a Lion-IRVT ``Hardware/source`` checkout. Without
+    it, the parent of this repository is used, which is right when it is
+    checked out as the ``lion-lvrt-integration`` submodule of Lion-IRVT. In a
+    standalone clone neither exists and the header checks skip, saying where
+    they looked.
+    """
+    env = os.environ.get("LION_IRVT_SOURCE")
+    return Path(env) if env else Path(__file__).resolve().parents[2]
+
+
+SOURCE_ROOT = _firmware_root()
 C2000_HEADER = SOURCE_ROOT / "tida-010086" / "bts_F2837xD_8ch" / "registers.h"
 ESP32_MIRROR = (
     SOURCE_ROOT
