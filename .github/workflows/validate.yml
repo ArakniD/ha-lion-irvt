@@ -6,9 +6,11 @@
 # Daily as well as on push, because both validators move: a repository that
 # passed in March can fail in June without a single commit here.
 #
-# Every check runs, including `topics` and `brands`. HACS itself only warns
-# on topics when a custom repository is added, but the action fails on it,
-# so the repository's GitHub topics must stay set.
+# Every check runs, including `topics` and `brands`. These repository checks
+# run only in this action - HACS does not apply them when a user adds the
+# repository by hand - but they are what the HACS default store requires, so
+# keeping them green keeps that door open. The topics live in the GitHub
+# repository settings, not in this tree.
 
 name: Validate
 
@@ -34,5 +36,5 @@ jobs:
     name: hassfest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: home-assistant/actions/hassfest@master

@@ -203,7 +203,7 @@ calibration_command:
         number:
           min: -100
           max: 100
-          step: 0.0001
+          step: any
           mode: box
     entry_id:
       name: Tester
