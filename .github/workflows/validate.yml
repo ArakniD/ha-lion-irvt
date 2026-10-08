@@ -1,0 +1,38 @@
+# The two checks HACS asks of an integration repository: its own validator,
+# which is what runs when a user adds this as a custom repository, and
+# Home Assistant's hassfest, which checks the manifest, services.yaml and
+# translations against the current core.
+#
+# Daily as well as on push, because both validators move: a repository that
+# passed in March can fail in June without a single commit here.
+#
+# Every check runs, including `topics` and `brands`. HACS itself only warns
+# on topics when a custom repository is added, but the action fails on it,
+# so the repository's GitHub topics must stay set.
+
+name: Validate
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: hacs/action@main
+        with:
+          category: integration
+
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master

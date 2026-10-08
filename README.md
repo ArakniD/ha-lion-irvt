@@ -38,8 +38,31 @@ Services: `configure_slot`, `set_serial`, `set_mode`, `resume_slot`,
 
 ## Installation
 
-Copy `custom_components/lion_lvrt/` into your Home Assistant `config/custom_components/`
-directory and restart, or add this repository to HACS as a custom repository.
+### HACS (recommended)
+
+[![Open your Home Assistant instance and add this repository to HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ArakniD&repository=ha-lion-irvt&category=integration)
+
+The button opens HACS on your Home Assistant with this repository filled in.
+Or, by hand:
+
+1. **HACS → ⋮ → Custom repositories**.
+2. Repository `https://github.com/ArakniD/ha-lion-irvt`, type **Integration**,
+   **Add**.
+3. Find **Lion LVRT Battery Tester** in HACS, **Download**, and restart Home
+   Assistant.
+
+HACS offers the tagged releases and the `main` branch. Take a release unless
+you are testing a change: `main` moves with the firmware and can be ahead of
+the tester you have.
+
+Needs Home Assistant **2024.4** or later. The brand icon in
+`custom_components/lion_lvrt/brand/` is shown from **2026.3**; older releases
+show the generic integration icon and are otherwise unaffected.
+
+### By hand
+
+Copy `custom_components/lion_lvrt/` into your Home Assistant
+`config/custom_components/` directory and restart.
 
 The tester advertises as `BTS-Tester`, so Home Assistant discovers it
 automatically if a Bluetooth adapter or proxy is in range — **Settings →
