@@ -90,5 +90,14 @@ class LionCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             self._warned_about_watchdog = True
 
     def handle_push(self, snapshot: DeviceSnapshot) -> None:
-        """Accept a notification-driven snapshot between polls."""
-        self.async_set_updated_data(snapshot)
+        """Accept a notification-driven snapshot between polls.
+
+        Deliberately not ``async_set_updated_data``: that cancels and
+        reschedules the poll timer, and the unit-status notification arrives
+        every second. Every push therefore pushed the next poll out by a full
+        interval and the poll never ran, so anything a notification does not
+        carry - every slot that is not running - went stale for good.
+        Updating the data and the listeners directly leaves the timer alone.
+        """
+        self.data = snapshot
+        self.async_update_listeners()
