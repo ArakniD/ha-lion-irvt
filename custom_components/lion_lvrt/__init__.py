@@ -15,6 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
 
 from .const import (
     CONF_ADDRESS,
@@ -84,6 +85,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    # Create the tester's own device first. The slot devices point at it with
+    # via_device_id, which takes the parent's registry id, so it has to exist
+    # before any platform registers a slot.
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name=entry.title,
+        manufacturer="Lion IRVT",
+        model="TIDA-010086 8-channel battery tester",
+    )
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     async_register_services(hass)
 
