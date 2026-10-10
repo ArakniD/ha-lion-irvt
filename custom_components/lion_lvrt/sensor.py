@@ -222,7 +222,40 @@ SLOT_SENSORS: tuple[SlotSensorDescription, ...] = (
 )
 
 
+#: ``eSlotMode`` low two bits: slots per control group.
+_GROUPING = {0: "independent", 1: "pairs", 2: "quads", 3: "octet"}
+
+
+def _mode_strap_name(unit: UnitStatus) -> str | None:
+    """The MODE dip strap in words, or None on firmware that does not report it.
+
+    The low two bits are the group size; bit 2 moves the voltage feedback from
+    the ADS131M08 to the C2000's internal ADC.
+    """
+    mode = unit.slot_mode
+    if mode is None:
+        return None
+    name = _GROUPING[mode & 3]
+    return f"{name} (internal ADC)" if mode & 4 else name
+
+
 UNIT_SENSORS: tuple[UnitSensorDescription, ...] = (
+    # How the unit is strapped. First in the list because everything else on
+    # the page - which slots exist, which accept commands - follows from it.
+    UnitSensorDescription(
+        key="mode_strap",
+        translation_key="mode_strap",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_mode_strap_name,
+    ),
+    UnitSensorDescription(
+        key="slots_enabled",
+        translation_key="slots_enabled",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        # The ENABLE strap gives the highest enabled slot, not a mask, so this
+        # is a count and slots above it are masked off.
+        value_fn=lambda u: u.slots_enabled,
+    ),
     UnitSensorDescription(
         key="input_voltage",
         translation_key="input_voltage",

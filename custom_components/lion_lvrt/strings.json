@@ -74,7 +74,9 @@
       "input_voltage": { "name": "Input voltage" },
       "unit_state": { "name": "Unit state" },
       "uptime": { "name": "Uptime" },
-      "watchdog_timeout": { "name": "Host watchdog timeout" }
+      "watchdog_timeout": { "name": "Host watchdog timeout" },
+      "mode_strap": { "name": "Mode strap" },
+      "slots_enabled": { "name": "Enabled slots" }
     },
     "binary_sensor": {
       "running": { "name": "Running" },
