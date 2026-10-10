@@ -145,7 +145,17 @@ async def _build_ble(
 
     address: str = entry.data[CONF_ADDRESS]
 
+    # Assigned below, once the transport exists: the callback has to reach it,
+    # and the transport needs the factory that holds the callback.
+    transport: BleTransport
+
+    def _on_disconnect(client) -> None:
+        transport.handle_disconnect(client)
+
     def _factory():
+        # Looked up afresh on every connect, never captured. After a unit
+        # reset the proxy may be a different one, or the device object stale.
+        #
         # connectable=True so a passive-only proxy is not offered: this
         # integration needs to write, not merely observe advertisements.
         ble_device = bluetooth.async_ble_device_from_address(
@@ -158,9 +168,21 @@ async def _build_ble(
             )
         from bleak import BleakClient  # noqa: PLC0415
 
-        return establish_connection(BleakClient, ble_device, address)
+        return establish_connection(
+            BleakClient,
+            ble_device,
+            entry.title or address,
+            disconnected_callback=_on_disconnect,
+            # Re-resolve the device on each attempt, so a retry can be routed
+            # through whichever adapter or proxy now has the best signal.
+            ble_device_callback=lambda: bluetooth.async_ble_device_from_address(
+                hass, address, connectable=True
+            )
+            or ble_device,
+        )
 
-    return BleTransport(_factory, slot_count=slot_count)
+    transport = BleTransport(_factory, slot_count=slot_count)
+    return transport
 
 
 async def _build_register_transport(

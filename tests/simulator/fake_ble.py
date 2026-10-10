@@ -94,6 +94,32 @@ class FakeBleClient:
     async def disconnect(self) -> None:
         self.is_connected = False
 
+    # --- link failure, as a unit reset or a dropped proxy produces it --------
+
+    def drop_link(self) -> None:
+        """The link dies. Every later call fails, and ``is_connected`` says so."""
+        self.is_connected = False
+
+    def hang(self) -> None:
+        """The link looks up but nothing answers: the read or write never returns."""
+        self._hung = True
+
+    def break_reads(self) -> None:
+        """Reads fail with GATT error 133 while ``is_connected`` stays True.
+
+        What the integration saw: the stack still believes in the link, so
+        checking the flag alone would reuse this client forever.
+        """
+        self._reads_broken = True
+
+    def _check_link(self) -> None:
+        if not self.is_connected or getattr(self, "_reads_broken", False):
+            raise BleakErrorSim(0x85)  # GATT_ERROR (133), what a dead link gives
+
+    async def _hang_if_hung(self) -> None:
+        if getattr(self, "_hung", False):
+            await __import__("asyncio").sleep(3600)
+
     def _truncate(self, data: bytes) -> bytes:
         """Apply the ATT MTU ceiling, as the link does.
 
@@ -104,6 +130,8 @@ class FakeBleClient:
         return data[: max(0, self.mtu_size - 3)]
 
     async def read_gatt_char(self, uuid: str, **_: Any) -> bytearray:
+        self._check_link()
+        await self._hang_if_hung()
         key = uuid.lower()
         if key not in self._known:
             raise BleakErrorSim(ATT_UNLIKELY)
@@ -139,6 +167,8 @@ class FakeBleClient:
     async def write_gatt_char(
         self, uuid: str, data: bytes, response: bool = True, **_: Any
     ) -> None:
+        self._check_link()
+        await self._hang_if_hung()
         key = uuid.lower()
         if key not in self._known:
             raise BleakErrorSim(ATT_UNLIKELY)
@@ -235,6 +265,7 @@ class FakeBleClient:
     async def start_notify(
         self, uuid: str, callback: Callable[[Any, bytearray], None], **_: Any
     ) -> None:
+        self._check_link()
         if uuid.lower() not in self._known:
             raise BleakErrorSim(ATT_UNLIKELY)
         self._notify_cbs[uuid.lower()] = callback

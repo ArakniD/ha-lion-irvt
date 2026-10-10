@@ -20,6 +20,13 @@ THREE THINGS THIS LAYER MUST GET RIGHT
 3. **A GATT write succeeding says nothing about acceptance.** The ATT layer
    returns a bare 0x0E for "the unit refused" and for "the stack failed"
    alike. Commands are verified by reading state back.
+
+4. **The link has to heal itself.** A unit that resets, walks out of range or
+   drops off a proxy leaves a client object that reports connected or fails
+   every call. Nothing here may keep reusing it: a failed read discards the
+   client, a client that says it is disconnected is replaced, and the next
+   operation reconnects and re-subscribes. Every call is bounded by a timeout,
+   because bleak has none of its own on reads and writes.
 """
 
 from __future__ import annotations
@@ -49,6 +56,25 @@ MIN_USABLE_MTU = 128
 #: from one client are the only concurrency hazard - hence a single lock.
 _COMMAND_SETTLE_S = 0.3
 
+#: A GATT read or write that has not answered by now never will. A unit that
+#: resets mid-poll can leave one hanging until the link's supervision timeout.
+OPERATION_TIMEOUT_S = 10.0
+
+#: Establishing a connection retries internally (bleak-retry-connector makes
+#: several attempts, each with its own scan and connect), so this is generous
+#: but finite: a proxy that never answers must not wedge the poll forever.
+CONNECT_TIMEOUT_S = 45.0
+
+#: Disconnecting a link that is already dead can itself hang.
+DISCONNECT_TIMEOUT_S = 5.0
+
+_TIMEOUTS = (asyncio.TimeoutError, TimeoutError)
+
+
+def _describe(err: BaseException) -> str:
+    """An error's message, or its type when it has none (timeouts do not)."""
+    return str(err) or type(err).__name__
+
 
 class BleTransport(Transport):
     """Talks to the proxy over GATT."""
@@ -67,11 +93,14 @@ class BleTransport(Transport):
         Injected rather than constructed here so the test suite can substitute
         a simulator without a Bluetooth stack, and so Home Assistant can hand
         in a ``bleak_retry_connector``-managed client that knows about proxies.
+        It is called again on every reconnect, so it must hand back a fresh
+        client each time and must not cache one.
         """
         self._client_factory = client_factory
         self._client: Any | None = None
         self._slot_count = slot_count
         self._slot_lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
         self._chars: set[str] = set()
         self._notify_cb: Callable[[DeviceSnapshot], None] | None = None
         self._last_unit: UnitStatus | None = None
@@ -80,12 +109,31 @@ class BleTransport(Transport):
 
     # --- lifecycle --------------------------------------------------------
 
+    def _is_connected(self) -> bool:
+        client = self._client
+        return client is not None and bool(getattr(client, "is_connected", True))
+
     async def async_connect(self) -> None:
-        if self._client is not None:
-            return
-        client = self._client_factory()
-        if asyncio.iscoroutine(client):
-            client = await client
+        """Connect if there is no live link. Idempotent, and safe to race."""
+        async with self._connect_lock:
+            if self._is_connected():
+                return
+            # Whatever is left is dead. Discard it rather than reuse it: this
+            # is what a unit reset or a dropped proxy link leaves behind.
+            await self._discard_client()
+            await self._open()
+
+    async def _open(self) -> None:
+        try:
+            client = self._client_factory()
+            if asyncio.iscoroutine(client):
+                client = await asyncio.wait_for(client, CONNECT_TIMEOUT_S)
+        except TransportError:
+            raise
+        except Exception as err:  # noqa: BLE001 - bleak raises its own types
+            # Home Assistant retries a ConfigEntryNotReady and a failed poll,
+            # but only if it sees a TransportError rather than a BleakError.
+            raise TransportError(f"could not connect: {_describe(err)}") from err
         self._client = client
 
         await self._discover_characteristics()
@@ -100,6 +148,49 @@ class BleTransport(Transport):
                 mtu,
                 mtu - 3,
             )
+
+        # A reconnect starts with no subscriptions. Without this the poll would
+        # carry on alone and the live feed would stay silent for good.
+        if self._notify_cb is not None:
+            await self._subscribe()
+
+    async def _discard_client(self) -> None:
+        client, self._client = self._client, None
+        if client is None:
+            return
+        try:
+            await asyncio.wait_for(client.disconnect(), DISCONNECT_TIMEOUT_S)
+        except Exception as err:  # noqa: BLE001 - teardown must not raise
+            _LOGGER.debug("Ignoring error discarding a dead client: %s", err)
+
+    async def _lose(self, client: Any, reason: str) -> None:
+        """Throw away ``client`` after a failure, so the next call reconnects."""
+        if client is not self._client:
+            return  # already replaced by someone else's reconnect
+        _LOGGER.warning("Bluetooth link to the tester lost (%s); will reconnect", reason)
+        await self._discard_client()
+
+    def handle_disconnect(self, client: Any) -> None:
+        """bleak's ``disconnected_callback``: the stack noticed the link drop.
+
+        Only marks the client dead; the reconnect happens on the next
+        operation. Matching on identity means the late callback from a client
+        we discarded ourselves cannot take down its replacement.
+        """
+        if client is not self._client:
+            return
+        self._client = None
+        _LOGGER.warning(
+            "Bluetooth link to the tester dropped; will reconnect on the next poll"
+        )
+
+    async def _client_ready(self) -> Any:
+        if not self._is_connected():
+            await self.async_connect()
+        client = self._client
+        if client is None:
+            raise TransportError("not connected")
+        return client
 
     async def _discover_characteristics(self) -> None:
         """Record which characteristics exist.
@@ -133,36 +224,47 @@ class BleTransport(Transport):
         return uuid.lower() in self._chars
 
     async def async_disconnect(self) -> None:
-        client, self._client = self._client, None
-        if client is None:
-            return
-        try:
-            await client.disconnect()
-        except Exception as err:  # noqa: BLE001 - teardown must not raise
-            _LOGGER.debug("Ignoring error during disconnect: %s", err)
+        # Forget the subscriber first, or a late reconnect would resubscribe a
+        # callback belonging to a coordinator that has already been unloaded.
+        self._notify_cb = None
+        async with self._connect_lock:
+            await self._discard_client()
 
     # --- reads ------------------------------------------------------------
 
     async def _read(self, uuid: str) -> bytes:
-        client = self._client
-        if client is None:
-            raise TransportError("not connected")
+        client = await self._client_ready()
         try:
-            return bytes(await client.read_gatt_char(uuid))
+            return bytes(
+                await asyncio.wait_for(client.read_gatt_char(uuid), OPERATION_TIMEOUT_S)
+            )
         except Exception as err:  # noqa: BLE001
-            raise TransportError(f"read of {uuid} failed: {err}") from err
+            # A failed read is treated as a lost link. The firmware could in
+            # principle fail one for lack of buffers, but that costs one
+            # reconnect, whereas keeping a dead client costs the integration:
+            # nothing else ever clears it. The "GATT error 133" that prompted
+            # this was exactly that - a link failure the old code kept reusing.
+            await self._lose(client, f"read of {uuid} failed: {_describe(err)}")
+            raise TransportError(f"read of {uuid} failed: {_describe(err)}") from err
 
     async def _write(self, uuid: str, data: bytes) -> None:
-        client = self._client
-        if client is None:
-            raise TransportError("not connected")
+        client = await self._client_ready()
         try:
             # response=True throughout: no characteristic here offers
             # write-without-response, and a read could otherwise overtake the
             # write that selected the slot.
-            await client.write_gatt_char(uuid, data, response=True)
+            await asyncio.wait_for(
+                client.write_gatt_char(uuid, data, response=True),
+                OPERATION_TIMEOUT_S,
+            )
         except Exception as err:  # noqa: BLE001
-            raise TransportError(f"write to {uuid} failed: {err}") from err
+            # Unlike a read, a failed write is usually the unit saying no: ATT
+            # 0x0E covers every refusal. Tearing the link down for that would
+            # turn each refused command into a reconnect, so only drop the
+            # client when the link itself is the problem.
+            if isinstance(err, _TIMEOUTS) or not getattr(client, "is_connected", True):
+                await self._lose(client, f"write to {uuid} failed: {_describe(err)}")
+            raise TransportError(f"write to {uuid} failed: {_describe(err)}") from err
 
     async def _select_and_read(self, slot: int, uuid: str) -> bytes:
         """Point the device's cursor at ``slot`` and read ``uuid``.
@@ -340,19 +442,28 @@ class BleTransport(Transport):
         Treat the feed as live data, not as a log: delivery is best-effort and
         a notification is silently dropped if the device's mbuf pool is
         exhausted. The coordinator still polls underneath.
+
+        The callback is kept, and the subscription is redone on every
+        reconnect: a new connection starts with none.
         """
+        await self.async_connect()
+        self._notify_cb = callback
+        await self._subscribe()
+
+    async def _subscribe(self) -> None:
         client = self._client
         if client is None:
             raise TransportError("not connected")
-        self._notify_cb = callback
 
         for uuid in proto.NOTIFY_UUIDS:
             if not self.has_characteristic(uuid):
                 continue
             try:
-                await client.start_notify(uuid, self._on_notify)
+                await asyncio.wait_for(
+                    client.start_notify(uuid, self._on_notify), OPERATION_TIMEOUT_S
+                )
             except Exception as err:  # noqa: BLE001
-                _LOGGER.warning("Could not subscribe to %s: %s", uuid, err)
+                _LOGGER.warning("Could not subscribe to %s: %s", uuid, _describe(err))
 
     def _on_notify(self, sender: Any, data: bytearray) -> None:
         uuid = getattr(sender, "uuid", str(sender)).lower()

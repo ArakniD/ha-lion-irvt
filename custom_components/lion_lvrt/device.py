@@ -119,6 +119,16 @@ class LionDevice:
                 )
                 self._registers = None
 
+    async def async_ensure_connected(self) -> None:
+        """Re-establish the primary link if it was lost. Cheap when it is up.
+
+        Called on every poll. Deliberately not :meth:`async_connect`: that one
+        discards a register transport that failed to connect, which is right
+        at start-up and wrong here, where a single transient failure would
+        permanently remove direct charge/discharge control.
+        """
+        await self._primary.async_connect()
+
     async def async_disconnect(self) -> None:
         for transport in self.transports:
             await transport.async_disconnect()

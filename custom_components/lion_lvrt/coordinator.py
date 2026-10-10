@@ -49,6 +49,9 @@ class LionCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         self.device = device
         self.entry = entry
         self._warned_about_watchdog = False
+        #: False from the first failed poll until the next good one, so the
+        #: recovery is logged once and an outage is not logged every cycle.
+        self._link_up = True
 
         super().__init__(
             hass,
@@ -59,10 +62,26 @@ class LionCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
 
     async def _async_update_data(self) -> DeviceSnapshot:
         try:
+            # Reconnects here if the link was lost. This runs on every poll, so
+            # a unit that is reset or out of range is picked up again as soon
+            # as it comes back, with no reload.
+            await self.device.async_ensure_connected()
             snapshot = await self.device.async_poll()
         except TransportError as err:
+            self._link_up = False
             raise UpdateFailed(f"could not reach the unit: {err}") from err
+        except Exception as err:  # noqa: BLE001
+            # Anything else a transport lets escape (a bleak error, a timeout)
+            # would be logged as an unexpected failure and could stop the
+            # refresh loop. Treat it as the link failing, which it is.
+            self._link_up = False
+            raise UpdateFailed(
+                f"could not reach the unit: {str(err) or type(err).__name__}"
+            ) from err
 
+        if not self._link_up:
+            _LOGGER.info("Connection to %s restored", self.entry.title)
+        self._link_up = True
         self._check_watchdog_margin(snapshot)
         return snapshot
 
