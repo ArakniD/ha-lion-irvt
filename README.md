@@ -34,6 +34,12 @@ abort-all button, and the four input-bus thresholds.
 Services: `configure_slot`, `set_serial`, `set_mode`, `resume_slot`,
 `calibration_command`, `get_result`.
 
+**Front-panel runs show up too.** The tester can also be driven from its own
+rotary encoder and display. A charge or discharge started there reports the
+slot state `direct` - a bare run the proxy supervises, with no test sequence -
+and the Mode select shows it as charge or discharge. Stopping it from Home
+Assistant works the same as stopping any other run.
+
 ---
 
 ## Installation
@@ -136,6 +142,12 @@ data:
   slot: 0
   force: true
 ```
+
+**Overrides only tighten.** Charge voltage, cutoff and temperature limits
+set on the unit's front panel can only be more conservative than the cell's
+own; the proxy clamps anything past them. Changing a slot's chemistry or model
+- from Home Assistant or the panel - drops those overrides, because a voltage
+chosen for one cell is wrong for another.
 
 **The unit can refuse a command without reporting anything.** If the DC input
 bus is outside its window, the firmware rejects a charge or discharge outright

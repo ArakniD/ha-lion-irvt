@@ -23,7 +23,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, StatusBit
+from .const import DOMAIN, SlotState, StatusBit
 from .coordinator import LionCoordinator
 from .entity import LionSlotEntity
 from .transport.base import TransportError, UnitRefusedError
@@ -91,7 +91,9 @@ class LionSlotModeSelect(LionSlotEntity, SelectEntity):
             return MODE_CHARGE
         if status.is_discharging:
             return MODE_DISCHARGE
-        if status.state.is_active:
+        # DIRECT is a bare run, never a test: if it has not picked up a
+        # direction yet it is idle as far as this select is concerned.
+        if status.state.is_active and status.state is not SlotState.DIRECT:
             return MODE_TEST
         return MODE_IDLE
 

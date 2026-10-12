@@ -114,6 +114,10 @@ class SlotState(IntEnum):
     # or the unit reset and restored from F-RAM. Never auto-resumed, because
     # the cell may have been swapped while the unit was off.
     BTS_PAUSED = 10
+    # A bare charge or discharge started from the unit's front panel (or by
+    # test_engine_run_direct() on any interface): no test sequence, but the
+    # engine supervises it. The BTS status word carries the direction.
+    DIRECT = 11
 
     @property
     def is_active(self) -> bool:
@@ -125,6 +129,7 @@ class SlotState(IntEnum):
             SlotState.DISCHARGE,
             SlotState.DISCHARGE_REST,
             SlotState.RECHARGE,
+            SlotState.DIRECT,
         )
 
     @property
