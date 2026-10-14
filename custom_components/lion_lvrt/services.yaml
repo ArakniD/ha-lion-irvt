@@ -19,7 +19,7 @@ configure_slot:
       required: true
       selector:
         select:
-          options: [lco, lto, lfp, nmc, nca]
+          options: [lco, lto, lfp, nmc, nca, none]
     model_name:
       name: Model name
       selector:

@@ -490,8 +490,10 @@ class SlotConfig:
     def encode(self) -> bytes:
         if not 0 <= self.slot < 8:
             raise ProtocolError(f"slot {self.slot} out of range 0-7")
-        if not 0 <= int(self.chemistry) < 5:
-            raise ProtocolError(f"chemistry {self.chemistry} out of range 0-4")
+        if not 0 <= int(self.chemistry) < len(CellChemistry):
+            raise ProtocolError(
+                f"chemistry {self.chemistry} out of range 0-{len(CellChemistry) - 1}"
+            )
         return struct.pack(
             SLOT_CONFIG_FMT,
             self.slot,

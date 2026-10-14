@@ -167,6 +167,10 @@ class CellChemistry(IntEnum):
     LFP = 2
     NMC = 3
     NCA = 4
+    # No chemistry: the unit's whole 0-5 V envelope with currents set directly,
+    # for bench work no cell profile fits - a shorted-socket test at a 0 V
+    # cutoff, a supply, a load. Appended in proxy firmware after 1.0.5.
+    NONE = 5
 
 
 class StatusBit(IntFlag):
