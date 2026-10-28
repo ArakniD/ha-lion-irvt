@@ -45,6 +45,16 @@ TRANSPORT_BLE: Final = "ble"
 TRANSPORT_CAN: Final = "can"
 TRANSPORT_HTTP: Final = "http"
 
+# Fired once per charge or discharge that finishes, carrying the unit's own
+# mAh/mWh counters, the voltage/temperature envelope seen during the run, and
+# the cell code assigned to that slot. This is the integration's public
+# contract with automations and with the recorder, so the name is stable and
+# fields are only ever appended - see assignments.py for the attribution
+# rules and README "Cycle events" for the payload.
+EVENT_CYCLE_COMPLETED: Final = f"{DOMAIN}_cycle_completed"
+#: Fired when a scan binds a cell code to a slot, or clears one.
+EVENT_CODE_ASSIGNED: Final = f"{DOMAIN}_code_assigned"
+
 # The BLE notify task ticks at 500 ms and emits slot/unit status every second
 # tick (ble-specification.md section 6.1), so polling faster than 1 Hz gains
 # nothing. Notifications are best-effort and silently dropped when the NimBLE

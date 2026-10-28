@@ -297,6 +297,226 @@ async def test_calibration_service_returns_telemetry(hass, mock_entry) -> None:
     assert response["ads_v_pu"] == pytest.approx(0.12)
 
 
+# --- barcode assignment and cycle events ------------------------------------
+
+
+async def _finish_a_discharge(hass, coordinator, unit, slot: int) -> None:
+    """Run a slot in discharge and then stop it, so a cycle completes."""
+    await coordinator.device.async_discharge(slot)
+    await coordinator.async_refresh()
+    unit.slots[slot].discharge_mah = 2450.0
+    unit.slots[slot].discharge_mwh = 8700.0
+    unit.slots[slot].discharge_seconds = 3600.0
+    await coordinator.async_refresh()
+    await coordinator.device.async_stop(slot)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+
+async def test_a_finished_discharge_fires_an_event(hass, mock_entry) -> None:
+    """The event is the integration's record of a completed cycle."""
+    from custom_components.lion_lvrt.const import EVENT_CYCLE_COMPLETED
+
+    unit = SimulatedUnit()
+    coordinator, _ = await _setup(hass, mock_entry, unit)
+
+    events = []
+    hass.bus.async_listen(EVENT_CYCLE_COMPLETED, events.append)
+
+    await _finish_a_discharge(hass, coordinator, unit, 0)
+
+    assert len(events) == 1
+    data = events[0].data
+    assert data["slot"] == 0
+    assert data["slot_number"] == 1
+    assert data["direction"] == "discharge"
+    assert data["mah"] == pytest.approx(2450.0)
+    assert data["mwh"] == pytest.approx(8700.0)
+    assert data["seconds"] == pytest.approx(3600.0)
+    # Unassigned: the cycle is still recorded, just without a cell.
+    assert data["code"] == ""
+    assert data["timestamp"]
+
+
+async def test_an_assigned_code_lands_on_the_cycle_event(hass, mock_entry) -> None:
+    from custom_components.lion_lvrt.const import EVENT_CYCLE_COMPLETED
+    from custom_components.lion_lvrt.services import async_register_services
+
+    unit = SimulatedUnit()
+    coordinator, _ = await _setup(hass, mock_entry, unit)
+    async_register_services(hass)
+
+    events = []
+    hass.bus.async_listen(EVENT_CYCLE_COMPLETED, events.append)
+
+    # The unit only keeps a serial on a slot that has a profile.
+    await hass.services.async_call(
+        DOMAIN,
+        "configure_slot",
+        {"slot": 1, "chemistry": "nmc", "capacity_mah": 3000},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "assign_code",
+        {"slot_code": "aabbccddeeff-2", "code": "CELL-00417"},
+        blocking=True,
+    )
+    await _finish_a_discharge(hass, coordinator, unit, 1)
+
+    assert len(events) == 1
+    assert events[0].data["code"] == "CELL-00417"
+    assert events[0].data["slot_number"] == 2
+    # The code also reached the tester as the slot's serial, so it lands in
+    # the unit's own stored result and on the front panel.
+    assert unit.slots[1].config.serial == "CELL-00417"
+
+
+async def test_assign_code_resolves_the_tester_by_address(hass, mock_entry) -> None:
+    """A barcode can carry the Bluetooth address; an entry_id is unprintable."""
+    from custom_components.lion_lvrt.services import async_register_services
+
+    unit = SimulatedUnit()
+    coordinator, _ = await _setup(hass, mock_entry, unit)
+    async_register_services(hass)
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "assign_code",
+        {"address": "AA:BB:CC:DD:EE:FF", "slot": 3, "code": "CELL-9"},
+        blocking=True,
+        return_response=True,
+    )
+    assert response["slot_number"] == 4
+    assert response["address"] == "AABBCCDDEEFF"
+    assert coordinator.assignments.data.code_for(3) == "CELL-9"
+
+    with pytest.raises(HomeAssistantError, match="no configured tester"):
+        await hass.services.async_call(
+            DOMAIN,
+            "assign_code",
+            {"address": "001122334455", "slot": 0, "code": "X"},
+            blocking=True,
+        )
+
+
+async def test_the_assignment_sticks_across_cycles_until_cleared(
+    hass, mock_entry
+) -> None:
+    """A charge, a rest and a discharge are three cycles on one cell."""
+    from custom_components.lion_lvrt.const import EVENT_CYCLE_COMPLETED
+    from custom_components.lion_lvrt.services import async_register_services
+
+    unit = SimulatedUnit()
+    coordinator, _ = await _setup(hass, mock_entry, unit)
+    async_register_services(hass)
+
+    events = []
+    hass.bus.async_listen(EVENT_CYCLE_COMPLETED, events.append)
+
+    await hass.services.async_call(
+        DOMAIN, "assign_code", {"slot": 0, "code": "CELL-A"}, blocking=True
+    )
+    await _finish_a_discharge(hass, coordinator, unit, 0)
+    await _finish_a_discharge(hass, coordinator, unit, 0)
+    assert [e.data["code"] for e in events] == ["CELL-A", "CELL-A"]
+
+    await hass.services.async_call(DOMAIN, "clear_code", {"slot": 0}, blocking=True)
+    await _finish_a_discharge(hass, coordinator, unit, 0)
+    assert events[-1].data["code"] == ""
+
+
+async def test_a_late_scan_can_relabel_the_last_cycle(hass, mock_entry) -> None:
+    """For the operator who scans the cell after the run, not before."""
+    from custom_components.lion_lvrt.services import async_register_services
+
+    unit = SimulatedUnit()
+    coordinator, _ = await _setup(hass, mock_entry, unit)
+    async_register_services(hass)
+
+    await _finish_a_discharge(hass, coordinator, unit, 2)
+    assert coordinator.assignments.data.last_cycle(2)["code"] == ""
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "assign_code",
+        {"slot": 2, "code": "CELL-LATE", "apply_to_last_cycle": True},
+        blocking=True,
+        return_response=True,
+    )
+    assert len(response["relabelled_cycles"]) == 1
+    assert coordinator.assignments.data.last_cycle(2)["code"] == "CELL-LATE"
+
+
+async def test_get_cycles_filters_by_slot_and_code(hass, mock_entry) -> None:
+    from custom_components.lion_lvrt.services import async_register_services
+
+    unit = SimulatedUnit()
+    coordinator, _ = await _setup(hass, mock_entry, unit)
+    async_register_services(hass)
+
+    await hass.services.async_call(
+        DOMAIN, "assign_code", {"slot": 0, "code": "CELL-A"}, blocking=True
+    )
+    await hass.services.async_call(
+        DOMAIN, "assign_code", {"slot": 1, "code": "CELL-B"}, blocking=True
+    )
+    await _finish_a_discharge(hass, coordinator, unit, 0)
+    await _finish_a_discharge(hass, coordinator, unit, 1)
+
+    response = await hass.services.async_call(
+        DOMAIN, "get_cycles", {}, blocking=True, return_response=True
+    )
+    assert response["count"] == 2
+
+    response = await hass.services.async_call(
+        DOMAIN, "get_cycles", {"slot": 1}, blocking=True, return_response=True
+    )
+    assert response["count"] == 1
+    assert response["cycles"][0]["code"] == "CELL-B"
+
+    response = await hass.services.async_call(
+        DOMAIN, "get_cycles", {"code": "cell-a"}, blocking=True, return_response=True
+    )
+    assert response["count"] == 1
+    assert response["cycles"][0]["slot"] == 0
+
+
+async def test_the_assigned_code_sensor_shows_the_binding(hass, mock_entry) -> None:
+    from custom_components.lion_lvrt.services import async_register_services
+
+    unit = SimulatedUnit()
+    await _setup(hass, mock_entry, unit)
+    async_register_services(hass)
+
+    assert hass.states.get("sensor.slot_5_assigned_cell_code").state == "unknown"
+
+    await hass.services.async_call(
+        DOMAIN, "assign_code", {"slot": 4, "code": "CELL-77"}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.slot_5_assigned_cell_code").state == "CELL-77"
+
+
+async def test_a_bad_slot_code_is_refused_with_a_reason(hass, mock_entry) -> None:
+    from custom_components.lion_lvrt.services import async_register_services
+
+    await _setup(hass, mock_entry, SimulatedUnit())
+    async_register_services(hass)
+
+    with pytest.raises(HomeAssistantError, match="no slot number"):
+        await hass.services.async_call(
+            DOMAIN,
+            "assign_code",
+            {"slot_code": "aabbccddeeff", "code": "X"},
+            blocking=True,
+        )
+    with pytest.raises(HomeAssistantError, match="no slot was given"):
+        await hass.services.async_call(
+            DOMAIN, "assign_code", {"code": "X"}, blocking=True
+        )
+
+
 # --- coordinator ------------------------------------------------------------
 
 

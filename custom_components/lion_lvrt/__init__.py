@@ -68,6 +68,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = LionCoordinator(
         hass, device, entry, scan_interval_s=DEFAULT_SCAN_INTERVAL_S
     )
+    # Before the first refresh: a cycle that ends on that very poll must find
+    # the cell code it was assigned before the restart.
+    await coordinator.assignments.async_load()
     await coordinator.async_config_entry_first_refresh()
 
     # Subscribe for the low-latency path. The poll continues underneath:
@@ -100,8 +103,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     async_register_services(hass)
 
+    # The model catalogue and the custom models file, in the background: the
+    # profile selects fill in when it lands, and a slow or refused upload must
+    # not hold up the integration loading.
+    entry.async_create_background_task(
+        hass, _async_load_models(hass, coordinator), "lion_lvrt models"
+    )
+
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True
+
+
+async def _async_load_models(hass: HomeAssistant, coordinator: LionCoordinator) -> None:
+    from homeassistant.exceptions import HomeAssistantError  # noqa: PLC0415
+
+    from .services import async_sync_models_file  # noqa: PLC0415
+
+    try:
+        await async_sync_models_file(hass, coordinator)
+    except HomeAssistantError as err:
+        _LOGGER.warning("Custom cell models not synced: %s", err)
+    try:
+        await coordinator.device.async_read_models()
+    except TransportError as err:
+        _LOGGER.debug("Model catalogue not read: %s", err)
+    coordinator.async_update_listeners()
 
 
 async def _build_primary(

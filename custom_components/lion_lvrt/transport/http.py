@@ -25,6 +25,7 @@ from ..protocol import registers as regs
 from ..protocol.ble import (
     CalStatus,
     CellChemistry,
+    CellModel,
     SlotConfig,
     SlotFault,
     SlotResult,
@@ -212,37 +213,48 @@ class HttpTransport(Transport):
         await self._post(f"/api/slot/{slot}/serial", {"serial": serial})
 
     async def async_read_config(self, slot: int) -> SlotConfig:
+        #
+        # Field names are the proxy's (web_api.c, write_slot_status): the
+        # chemistry is a NAME, the model is "model", and the recharge flag is
+        # "auto_recharge_to_shipping". This used to parse the chemistry as an
+        # int - which fails on "NMC" and fell back to NMC - and read
+        # model_name/auto_recharge, which the proxy never sends.
+        #
+        # "config" is only present once a profile has been applied; an
+        # unconfigured slot reads as the defaults.
+        #
         body = await self._get(f"/api/slot/{slot}")
-        cfg = body.get("config", {})
-        try:
-            chem = CellChemistry(int(cfg.get("chemistry", 3)))
-        except (ValueError, TypeError):
-            chem = CellChemistry.NMC
+        cfg = body.get("config") or {}
+        chem = _chemistry_from_json(cfg.get("chemistry"))
         return SlotConfig(
             slot=slot,
             chemistry=chem,
-            auto_recharge=bool(cfg.get("auto_recharge", False)),
+            auto_recharge=bool(
+                cfg.get("auto_recharge_to_shipping", cfg.get("auto_recharge", False))
+            ),
             capacity_mah=float(cfg.get("capacity_mah", 0.0)),
             charge_c=float(cfg.get("charge_c", 0.0)),
             discharge_c=float(cfg.get("discharge_c", 0.0)),
             shipping_pct=float(cfg.get("shipping_pct", 60.0)),
             max_duration_minutes=int(cfg.get("max_duration_minutes", 0)),
-            model_name=str(cfg.get("model_name", "")),
-            serial=str(cfg.get("serial", "")),
+            model_name=str(cfg.get("model", cfg.get("model_name", ""))),
+            serial=str(body.get("serial", cfg.get("serial", ""))),
         )
 
     async def async_write_config(self, config: SlotConfig) -> None:
+        # Same names as the read: the proxy ignores any key it does not know,
+        # so a mismatch here fails silently rather than with an error.
         await self._post(
             f"/api/slot/{config.slot}/config",
             {
-                "chemistry": int(config.chemistry),
-                "auto_recharge": config.auto_recharge,
+                "chemistry": config.chemistry.name,
+                "auto_recharge_to_shipping": config.auto_recharge,
                 "capacity_mah": config.capacity_mah,
                 "charge_c": config.charge_c,
                 "discharge_c": config.discharge_c,
                 "shipping_pct": config.shipping_pct,
                 "max_duration_minutes": config.max_duration_minutes,
-                "model_name": config.model_name,
+                "model": config.model_name,
                 "serial": config.serial,
             },
         )
@@ -293,6 +305,51 @@ class HttpTransport(Transport):
             raise TransportError("calibration status unreadable after command")
         return status
 
+
+    # --- cell model catalogue --------------------------------------------
+
+    async def async_read_models(self) -> list[CellModel]:
+        body = await self._get("/api/catalog")
+        models: list[CellModel] = []
+        for m in body.get("models") or []:
+            try:
+                models.append(
+                    CellModel(
+                        name=str(m.get("name", "")),
+                        chemistry=_chemistry_from_json(m.get("chemistry")),
+                        capacity_mah=float(m.get("capacity_mah", 0.0)),
+                        charge_current_max_a=float(m.get("charge_current_max_a", 0.0)),
+                        discharge_current_max_a=float(
+                            m.get("discharge_current_max_a", 0.0)
+                        ),
+                        charge_v_max=float(m.get("charge_v_max", 0.0)),
+                        discharge_v_min=float(m.get("discharge_v_min", 0.0)),
+                        manufacturer=str(m.get("manufacturer", "")),
+                        custom=bool(m.get("custom", False)),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        return models
+
+    async def async_save_model(self, model: CellModel) -> None:
+        model.validate()
+        await self._post(
+            f"/api/model/{model.name}",
+            {
+                "chemistry": model.chemistry.name,
+                "manufacturer": model.manufacturer,
+                "capacity_mah": model.capacity_mah,
+                "charge_current_max_a": model.charge_current_max_a,
+                "discharge_current_max_a": model.discharge_current_max_a,
+                "charge_v_max": model.charge_v_max,
+                "discharge_v_min": model.discharge_v_min,
+            },
+        )
+
+    async def async_delete_model(self, name: str) -> None:
+        await self._request("DELETE", f"/api/model/{name}")
+
     # --- registers --------------------------------------------------------
 
     async def async_read_register(self, address: int) -> float:
@@ -312,6 +369,19 @@ class HttpTransport(Transport):
         await self._post("/api/registers", {"addr": address, "value": value})
 
 
+def _chemistry_from_json(value: object) -> CellChemistry:
+    """The proxy sends a chemistry NAME ("NMC"); an int is accepted too."""
+    if isinstance(value, str):
+        try:
+            return CellChemistry[value.strip().upper()]
+        except KeyError:
+            pass
+    try:
+        return CellChemistry(int(value))  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return CellChemistry.NMC
+
+
 def _slot_from_json(slot: int, entry: dict) -> SlotStatus:
     """Decode one slot object from ``/api/status``."""
     try:
@@ -322,6 +392,18 @@ def _slot_from_json(slot: int, entry: dict) -> SlotStatus:
         fault = SlotFault(int(entry.get("fault", 0)))
     except (ValueError, TypeError):
         fault = SlotFault.NONE
+
+    #
+    # The BTS's own view arrives nested under "bts", with the unprefixed names
+    # the proxy writes (web_api.c, write_slot_status). This used to read flat
+    # bts_* keys that the proxy has never sent, so every one of these fields -
+    # the accumulators included - decoded as 0 over HTTP. The flat names are
+    # still accepted as a fallback.
+    #
+    bts = entry.get("bts") or {}
+
+    def _b(key: str, default: float = 0.0) -> float:
+        return float(bts.get(key, entry.get(f"bts_{key}", default)))
 
     return SlotStatus(
         slot=slot,
@@ -336,15 +418,15 @@ def _slot_from_json(slot: int, entry: dict) -> SlotStatus:
         progress=float(entry.get("progress", 0.0)),
         elapsed_s=int(entry.get("elapsed_s", 0)),
         state_elapsed_s=int(entry.get("state_elapsed_s", 0)),
-        status_bits=int(entry.get("status_bits", 0)),
-        bts_paused=bool(entry.get("bts_paused", False)),
-        bts_wd_tripped=bool(entry.get("bts_wd_tripped", False)),
-        bts_restored=bool(entry.get("bts_restored", False)),
-        bts_ended=bool(entry.get("bts_ended", False)),
-        bts_charge_mah=float(entry.get("bts_charge_mah", 0.0)),
-        bts_charge_mwh=float(entry.get("bts_charge_mwh", 0.0)),
-        bts_charge_seconds=float(entry.get("bts_charge_seconds", 0.0)),
-        bts_discharge_mah=float(entry.get("bts_discharge_mah", 0.0)),
-        bts_discharge_mwh=float(entry.get("bts_discharge_mwh", 0.0)),
-        bts_discharge_seconds=float(entry.get("bts_discharge_seconds", 0.0)),
+        status_bits=int(entry.get("status_bits", entry.get("bts_status", 0))),
+        bts_paused=bool(bts.get("paused", entry.get("bts_paused", False))),
+        bts_wd_tripped=bool(bts.get("watchdog_tripped", entry.get("bts_wd_tripped", False))),
+        bts_restored=bool(bts.get("restored", entry.get("bts_restored", False))),
+        bts_ended=bool(bts.get("ended", entry.get("bts_ended", False))),
+        bts_charge_mah=_b("charge_mah"),
+        bts_charge_mwh=_b("charge_mwh"),
+        bts_charge_seconds=_b("charge_seconds"),
+        bts_discharge_mah=_b("discharge_mah"),
+        bts_discharge_mwh=_b("discharge_mwh"),
+        bts_discharge_seconds=_b("discharge_seconds"),
     )

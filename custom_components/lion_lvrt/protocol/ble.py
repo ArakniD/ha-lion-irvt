@@ -72,6 +72,8 @@ CAL_STATUS_UUID: Final = _uuid(0x000C)
 #: Register access, added for BLE_PROTO_VERSION 4. Absent on older firmware,
 #: which is why every use of it is feature-detected rather than version-gated.
 REGISTER_UUID: Final = _uuid(0x000D)
+#: Custom cell-model save/delete, write-only. Added in BLE_PROTO_VERSION 8.
+MODEL_UUID: Final = _uuid(0x000E)
 
 NOTIFY_UUIDS: Final = (UNIT_STATUS_UUID, SLOT_STATUS_UUID, CAL_STATUS_UUID)
 
@@ -158,6 +160,15 @@ CAL_STATUS_LEN: Final = struct.calcsize(CAL_STATUS_FMT)
 
 # ble_register_cmd_t / ble_register_value_t, characteristic 000d (proto 4).
 #   H addr  B write  B count  f value
+# ble_model_cmd_t, 56 B: op, chemistry, reserved, five floats, name, maker.
+MODEL_CMD_FMT: Final = "<BBHfffff8s24s"
+MODEL_CMD_LEN: Final = struct.calcsize(MODEL_CMD_FMT)
+MODEL_OP_SAVE: Final = 1
+MODEL_OP_DELETE: Final = 2
+#: The proxy's ceiling on custom models, and on their names (7 characters).
+CUSTOM_MODEL_MAX: Final = 12
+CUSTOM_MODEL_NAME_MAX: Final = 7
+
 REGISTER_CMD_FMT: Final = "<HBBf"
 REGISTER_CMD_LEN: Final = struct.calcsize(REGISTER_CMD_FMT)
 
@@ -174,6 +185,7 @@ assert CATALOG_ENTRY_LEN == 96, CATALOG_ENTRY_LEN
 assert COMMAND_LEN == 4, COMMAND_LEN
 assert CAL_CMD_LEN == 8, CAL_CMD_LEN
 assert CAL_STATUS_LEN == 48, CAL_STATUS_LEN
+assert MODEL_CMD_LEN == 56, MODEL_CMD_LEN
 
 
 def _text(raw: bytes) -> str:
@@ -597,6 +609,9 @@ class CatalogEntry:
 
     KIND_CHEMISTRY: ClassVar[int] = 0
     KIND_MODEL: ClassVar[int] = 1
+    #: A user-defined model from the proxy's NVS store (proto 8). Same layout
+    #: as KIND_MODEL; only the kind differs.
+    KIND_CUSTOM_MODEL: ClassVar[int] = 2
 
     @classmethod
     def decode(cls, data: bytes) -> "CatalogEntry":
@@ -628,7 +643,11 @@ class CatalogEntry:
 
     @property
     def is_model(self) -> bool:
-        return self.kind == CatalogEntry.KIND_MODEL
+        return self.kind in (CatalogEntry.KIND_MODEL, CatalogEntry.KIND_CUSTOM_MODEL)
+
+    @property
+    def is_custom(self) -> bool:
+        return self.kind == CatalogEntry.KIND_CUSTOM_MODEL
 
 
 @dataclass(frozen=True, slots=True)
@@ -735,3 +754,82 @@ def decode_register_value(data: bytes) -> tuple[int, float]:
         REGISTER_CMD_FMT, data[:REGISTER_CMD_LEN]
     )
     return addr, value
+
+
+@dataclass(frozen=True, slots=True)
+class CellModel:
+    """A cell model, as uploaded to (or listed by) the proxy.
+
+    The figures follow the firmware's ``cell_model_t``: the currents are the
+    cell's continuous ratings and the voltages override the chemistry's, with
+    0 meaning "inherit the chemistry". Capacity is required.
+    """
+
+    name: str
+    chemistry: CellChemistry
+    capacity_mah: float
+    charge_current_max_a: float = 0.0
+    discharge_current_max_a: float = 0.0
+    charge_v_max: float = 0.0
+    discharge_v_min: float = 0.0
+    manufacturer: str = ""
+    custom: bool = True
+
+    def validate(self) -> None:
+        """Raise ProtocolError on anything the proxy would refuse."""
+        name = self.name
+        if not 1 <= len(name) <= CUSTOM_MODEL_NAME_MAX:
+            raise ProtocolError(
+                f"model name {name!r} must be 1-{CUSTOM_MODEL_NAME_MAX} characters"
+            )
+        if not all(c.isascii() and (c.isalnum() or c in "-_") for c in name):
+            raise ProtocolError(f"model name {name!r} may use only A-Z, 0-9, - and _")
+        if not self.capacity_mah > 0:
+            raise ProtocolError(f"model {name}: capacity_mah must be above 0")
+        for field in ("charge_current_max_a", "discharge_current_max_a",
+                      "charge_v_max", "discharge_v_min"):
+            if getattr(self, field) < 0:
+                raise ProtocolError(f"model {name}: {field} cannot be negative")
+        if self.charge_v_max > 5.0 or self.discharge_v_min > 5.0:
+            raise ProtocolError(f"model {name}: voltages are limited to 0-5 V")
+        if self.charge_v_max and self.discharge_v_min >= self.charge_v_max:
+            raise ProtocolError(
+                f"model {name}: discharge_v_min must be below charge_v_max"
+            )
+        if len(self.manufacturer.encode("utf-8")) > 23:
+            raise ProtocolError(f"model {name}: manufacturer is limited to 23 bytes")
+
+    def encode_save(self) -> bytes:
+        self.validate()
+        return struct.pack(
+            MODEL_CMD_FMT,
+            MODEL_OP_SAVE,
+            int(self.chemistry),
+            0,
+            float(self.capacity_mah),
+            float(self.charge_current_max_a),
+            float(self.discharge_current_max_a),
+            float(self.charge_v_max),
+            float(self.discharge_v_min),
+            _fixed(self.name, 8),
+            _fixed(self.manufacturer, 24),
+        )
+
+    @classmethod
+    def from_catalog(cls, entry: "CatalogEntry") -> "CellModel":
+        return cls(
+            name=entry.name,
+            chemistry=entry.chemistry,
+            capacity_mah=entry.capacity_mah,
+            charge_current_max_a=entry.charge_current_max_a,
+            discharge_current_max_a=entry.discharge_current_max_a,
+            charge_v_max=entry.charge_v_max,
+            discharge_v_min=entry.discharge_v_min,
+            manufacturer=entry.manufacturer,
+            custom=entry.is_custom,
+        )
+
+
+def encode_model_delete(name: str) -> bytes:
+    return struct.pack(MODEL_CMD_FMT, MODEL_OP_DELETE, 0, 0, 0, 0, 0, 0, 0,
+                       _fixed(name, 8), b"")

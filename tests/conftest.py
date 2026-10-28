@@ -105,8 +105,36 @@ def _install_ha_stubs() -> None:
            UnitOfElectricCurrent=_Sentinel(), UnitOfElectricPotential=_Sentinel(),
            UnitOfEnergy=_Sentinel(), UnitOfTemperature=_Sentinel(),
            UnitOfTime=_Sentinel())
+    class _Store:
+        """Enough of homeassistant.helpers.storage.Store to hold data in RAM.
+
+        The assignment store is exercised for real in the Home Assistant
+        tier; here it only has to not explode on import and on use, so the
+        pure-Python attribution rules in test_cycles.py can run.
+        """
+
+        def __init__(self, hass: object, version: int, key: str) -> None:
+            self._data: object = None
+
+        async def async_load(self) -> object:
+            return self._data
+
+        def async_delay_save(self, factory, _delay: float = 0) -> None:
+            self._data = factory()
+
+        async def async_remove(self) -> None:
+            self._data = None
+
+    module("homeassistant.util")
+    module(
+        "homeassistant.util.dt",
+        utcnow=lambda: __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ),
+    )
     module("homeassistant.helpers")
     module("homeassistant.helpers.config_validation", string=str, boolean=bool)
+    module("homeassistant.helpers.storage", Store=_Store)
     module("homeassistant.helpers.device_registry", DeviceInfo=dict)
     module("homeassistant.helpers.entity_platform", AddEntitiesCallback=_Sentinel)
     module("homeassistant.helpers.aiohttp_client",

@@ -48,9 +48,16 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: LionCoordinator = hass.data[DOMAIN][entry.entry_id]
+    from .profile import profile_selects  # noqa: PLC0415
+
     async_add_entities(
-        LionSlotModeSelect(coordinator, slot)
-        for slot in range(coordinator.device.slot_count)
+        [
+            *(
+                LionSlotModeSelect(coordinator, slot)
+                for slot in range(coordinator.device.slot_count)
+            ),
+            *profile_selects(coordinator),
+        ]
     )
 
 

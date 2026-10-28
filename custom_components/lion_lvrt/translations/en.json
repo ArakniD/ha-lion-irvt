@@ -76,7 +76,8 @@
       "uptime": { "name": "Uptime" },
       "watchdog_timeout": { "name": "Host watchdog timeout" },
       "mode_strap": { "name": "Mode strap" },
-      "slots_enabled": { "name": "Enabled slots" }
+      "slots_enabled": { "name": "Enabled slots" },
+      "assigned_code": { "name": "Assigned cell code" }
     },
     "binary_sensor": {
       "running": { "name": "Running" },
@@ -97,7 +98,9 @@
       "wifi_connected": { "name": "WiFi connected" }
     },
     "select": {
-      "slot_mode": { "name": "Mode" }
+      "slot_mode": { "name": "Mode" },
+      "chemistry": { "name": "Chemistry" },
+      "model": { "name": "Cell model" }
     },
     "button": {
       "start": { "name": "Start test" },
@@ -117,7 +120,10 @@
       "charge_restrict_v": { "name": "Charge restrict threshold" },
       "discharge_restrict_v": { "name": "Discharge restrict threshold" },
       "discharge_disable_v": { "name": "Discharge disable threshold" },
-      "host_watchdog": { "name": "Host watchdog timeout" }
+      "host_watchdog": { "name": "Host watchdog timeout" },
+      "capacity": { "name": "Capacity" },
+      "charge_c": { "name": "Charge C-rate" },
+      "discharge_c": { "name": "Discharge C-rate" }
     }
   }
 }

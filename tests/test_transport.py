@@ -378,3 +378,50 @@ def test_can_telemetry_ids() -> None:
     assert canproto.MAILBOX_ID == 0x1C000002
     assert canproto.channel_of(0x1C300001) == 3
     assert canproto.channel_of(canproto.MAILBOX_ID) is None
+
+
+def test_http_status_reads_nested_bts_block() -> None:
+    """The proxy nests the BTS view under "bts" (web_api.c write_slot_status).
+
+    The decoder used to look for flat bts_* keys the proxy never sent, so the
+    accumulators - now the figures the capacity sensors report - read 0.
+    """
+    from custom_components.lion_lvrt.transport.http import _slot_from_json
+
+    entry = {
+        "slot": 1,
+        "state": 0,
+        "fault": 0,
+        "voltage_v": 3.7,
+        "current_a": 2.5,
+        "bts_status": 0x91,
+        "bts": {
+            "paused": False,
+            "watchdog_tripped": True,
+            "restored": False,
+            "ended": False,
+            "charge_mah": 812.4,
+            "charge_mwh": 3001.5,
+            "charge_seconds": 1200,
+            "discharge_mah": 1.0,
+            "discharge_mwh": 2.0,
+            "discharge_seconds": 3,
+        },
+    }
+    status = _slot_from_json(1, entry)
+    assert status.status_bits == 0x91
+    assert status.bts_wd_tripped is True
+    assert status.bts_charge_mah == 812.4
+    assert status.bts_charge_mwh == 3001.5
+    assert status.bts_charge_seconds == 1200
+    assert status.bts_discharge_mah == 1.0
+
+
+def test_http_chemistry_name_decodes() -> None:
+    """The proxy sends the chemistry as a name, not the enum's int."""
+    from custom_components.lion_lvrt.transport.http import _chemistry_from_json
+
+    assert _chemistry_from_json("LFP") is CellChemistry.LFP
+    assert _chemistry_from_json("none") is CellChemistry.NONE
+    assert _chemistry_from_json(2) is CellChemistry.LFP
+    assert _chemistry_from_json(None) is CellChemistry.NMC

@@ -125,6 +125,7 @@ def _format_offsets(fmt: str) -> list[int]:
         ("ble_cmd_t", proto.COMMAND_FMT),
         ("ble_cal_cmd_t", proto.CAL_CMD_FMT),
         ("ble_cal_status_t", proto.CAL_STATUS_FMT),
+        ("ble_model_cmd_t", proto.MODEL_CMD_FMT),
     ],
 )
 def test_layouts_match_firmware_header(c_name: str, fmt: str) -> None:

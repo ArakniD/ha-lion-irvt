@@ -53,6 +53,22 @@ class UnitSensorDescription(SensorEntityDescription):
     value_fn: Callable[[UnitStatus], float | int | str | None]
 
 
+def _bts_active(status: SlotStatus, charge: float, discharge: float) -> float:
+    """The BTS accumulator for the direction the slot is running in.
+
+    The unit keeps one pair per direction, each zeroed only when that
+    direction starts, so a slot that charged and then discharged holds both.
+    The CHARGING status bit says which one is live; with neither direction
+    flagged (idle, ended), the discharge figure is the test's result and is
+    the one worth showing.
+    """
+    if status.status_bits & StatusBit.CHARGING:
+        return charge
+    if status.status_bits & StatusBit.DISCHARGING:
+        return discharge
+    return discharge
+
+
 def _state_name(status: SlotStatus) -> str:
     """Human-readable state, distinguishing *why* a slot is paused.
 
@@ -133,9 +149,12 @@ SLOT_SENSORS: tuple[SlotSensorDescription, ...] = (
         native_unit_of_measurement="mAh",
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
-        # The ESP32's own integration, which is the figure to use: the BTS
-        # accumulators are only worth comparing against.
-        value_fn=lambda s: s.live_mah,
+        # The BTS's own accumulator for the direction the slot is in. It
+        # integrates the ADS131M08 current the loop regulates against, on the
+        # C2000's own timebase, and survives a host or link restart - so it is
+        # the figure to show. The ESP32's local integration (live_mah) is no
+        # longer reported here.
+        value_fn=lambda s: _bts_active(s, s.bts_charge_mah, s.bts_discharge_mah),
     ),
     SlotSensorDescription(
         key="live_energy",
@@ -143,7 +162,7 @@ SLOT_SENSORS: tuple[SlotSensorDescription, ...] = (
         native_unit_of_measurement="mWh",
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
-        value_fn=lambda s: s.live_mwh,
+        value_fn=lambda s: _bts_active(s, s.bts_charge_mwh, s.bts_discharge_mwh),
     ),
     SlotSensorDescription(
         key="progress",
@@ -315,6 +334,7 @@ async def async_setup_entry(
             LionSlotSensor(coordinator, slot, description)
             for description in SLOT_SENSORS
         )
+        entities.append(LionSlotCodeSensor(coordinator, slot))
     async_add_entities(entities)
 
 
@@ -381,3 +401,51 @@ class LionUnitSensor(LionEntity, SensorEntity):
         if self.coordinator.data is None:
             return None
         return self.entity_description.value_fn(self.coordinator.data.unit)
+
+
+class LionSlotCodeSensor(LionSlotEntity, SensorEntity):
+    """The cell code a scan bound to this slot.
+
+    Not a measurement of the tester - it is Home Assistant's own record of
+    which cell is in the holder, and the thing a finished cycle is filed
+    under. It survives a restart and a link outage, so it stays available
+    even when the slot's other sensors do not.
+    """
+
+    _attr_translation_key = "assigned_code"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: LionCoordinator, slot: int) -> None:
+        super().__init__(coordinator, slot, "assigned_code")
+
+    @property
+    def available(self) -> bool:
+        # Deliberately not LionSlotEntity.available: the assignment is local
+        # and remains true and useful while the tester is unreachable.
+        return True
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.assignments.data.code_for(self.slot) or None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        data = self.coordinator.assignments.data
+        assignment = data.get(self.slot)
+        last = data.last_cycle(self.slot)
+        attributes: dict[str, object] = {
+            "assigned_at": assignment.assigned_at if assignment else None,
+            "slot_code": assignment.slot_code if assignment else None,
+            "note": assignment.note if assignment else None,
+        }
+        if last is not None:
+            attributes.update(
+                last_cycle_direction=last.get("direction"),
+                last_cycle_outcome=last.get("outcome"),
+                last_cycle_mah=last.get("mah"),
+                last_cycle_mwh=last.get("mwh"),
+                last_cycle_seconds=last.get("seconds"),
+                last_cycle_code=last.get("code"),
+                last_cycle_at=last.get("timestamp"),
+            )
+        return attributes

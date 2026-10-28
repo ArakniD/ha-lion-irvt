@@ -22,17 +22,20 @@ Per slot (eight of them), as their own Home Assistant devices:
 |---|---|
 | **Mode** | one `select` — idle / charge / discharge / test |
 | **Buttons** | start test, stop, pause, resume, clear fault |
-| **Measurements** | voltage, current, cell temperature, charge moved, energy moved, progress, elapsed |
+| **Measurements** | voltage, current (the ADS131M08 path the loop regulates on), cell temperature, charge moved, energy moved (the BTS's own counters), progress, elapsed |
 | **Status** | state, fault, running, charging, paused, needs-operator, reverse polarity, calibrating, calibration valid, group follower, slot disabled |
-| **Configuration** | charge/discharge voltage and current limits, cell temperature window |
+| **Cell profile** | chemistry and cell model (dropdowns from the tester's own catalogue), capacity, charge and discharge C-rate - read from the tester and kept by it across a restart |
+| **Limits** | voltage and current limits, cell temperature max |
 | **Unit counters** | the BTS's own per-direction mAh / mWh / seconds |
+| **Cell code** | the barcode scanned onto this slot, with the last cycle's figures as attributes |
 
 Plus, for the unit: input voltage, unit state, uptime, online, WiFi, host
 watchdog armed and its timeout, charge-allowed and discharge-allowed, an
 abort-all button, and the four input-bus thresholds.
 
 Services: `configure_slot`, `set_serial`, `set_mode`, `resume_slot`,
-`calibration_command`, `get_result`.
+`calibration_command`, `get_result`, `sync_models`, `delete_model`,
+`assign_code`, `clear_code`, `get_cycles`.
 
 **Front-panel runs show up too.** The tester can also be driven from its own
 rotary encoder and display. A charge or discharge started there reports the
@@ -183,6 +186,156 @@ Worth knowing before you file one:
 
 ---
 
+## Cycle events and cell barcodes
+
+Every charge or discharge that finishes fires a
+`lion_lvrt_cycle_completed` event carrying what the slot moved — and, if a
+cell barcode has been scanned onto that slot, which cell it moved it for.
+That is what makes the tester's output traceable to a physical battery.
+
+### Scanning from a phone
+
+Two scans: one of the label on the slot, one of the barcode on the cell.
+
+```yaml
+action: lion_lvrt.assign_code
+data:
+  slot_code: e465b810d93a-3     # scanned from the slot label
+  code: CELL-00417              # scanned from the cell
+```
+
+The slot label carries the tester's Bluetooth address and the front-panel
+slot number, so one call is unambiguous on a bench with several testers.
+These forms all work, in any case, with or without separators:
+
+```
+e465b810d93a-3      E4:65:B8:10:D9:3A S3      BTS/e465b810d93a/SLOT3
+```
+
+A dashboard with a slot picker rather than a slot barcode can send `slot`
+(zero-based) and `address` instead; with a single tester configured, `slot`
+alone is enough. An explicit `slot` or `address` overrides whatever the
+scanned label said, so a mislabelled socket can be corrected without
+reprinting anything.
+
+A barcode scanner card on a phone dashboard, or the companion app's own
+scanner, fills these in. The slot number in a label is **1-based**, matching
+the panel's silk-screen.
+
+### What is recorded
+
+The assignment is sticky. It stays until you scan a different cell onto that
+slot or call `lion_lvrt.clear_code` — not until the end of a test, because a
+characterisation runs a charge, a rest and a discharge, which are three
+cycles on one cell. It also survives a Home Assistant restart.
+
+`assign_code` also writes the code to the tester as that slot's serial, so it
+reaches the unit's own stored result and the front panel. If the tester is
+unreachable the assignment is still kept here and the response says the
+serial did not land; pass `set_serial: false` to skip it.
+
+Each event carries:
+
+| Field | |
+|---|---|
+| `slot`, `slot_number` | zero-based index, and the panel's 1-based number |
+| `direction` | `charge` or `discharge` |
+| `outcome` | `complete`, `ended`, `phase`, `stopped`, `aborted` or `fault` |
+| `mah`, `mwh`, `seconds` | the **unit's own** counters for that direction |
+| `counter_source` | `bts`, or `proxy` on a build whose accumulators are never populated |
+| `voltage_start_v`, `voltage_end_v`, `voltage_rested_v` | at the start, under load at the end, and after the current stopped |
+| `voltage_min_v`, `voltage_max_v`, `temp_max_c`, `current_max_a` | the envelope seen during the run |
+| `code`, `serial`, `model`, `chemistry`, `capacity_mah` | the cell this is filed under, and its profile |
+| `timestamp`, `tester`, `address`, `entry_id` | when and which unit |
+
+`outcome` is worth reading before trusting a figure. A characterisation's
+charge phase ends as `phase`, which is normal; `fault` or `aborted` means
+the run was cut short and the figures are partial.
+
+The timestamp is Home Assistant's, not the tester's — the device has no
+real-time clock and reports only uptime.
+
+### Logging it
+
+The event is in the recorder, so a logbook entry or a notification is an
+ordinary automation:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: lion_lvrt_cycle_completed
+conditions:
+  - "{{ trigger.event.data.direction == 'discharge' }}"
+  - "{{ trigger.event.data.outcome in ['complete', 'ended'] }}"
+actions:
+  - action: logbook.log
+    data:
+      name: "{{ trigger.event.data.tester }} slot {{ trigger.event.data.slot_number }}"
+      message: >-
+        {{ trigger.event.data.code or 'unidentified cell' }}
+        discharged {{ trigger.event.data.mah }} mAh
+        ({{ trigger.event.data.mwh }} mWh)
+```
+
+`lion_lvrt.get_cycles` returns the recent tail for a dashboard, filterable by
+slot or by cell code. It is a bounded tail — the last 200 cycles per tester —
+not an archive; the recorder holds the history.
+
+### Scanning the cell afterwards
+
+If the cell is scanned after the run rather than before, the cycle is logged
+with no code. Attach one retrospectively with:
+
+```yaml
+action: lion_lvrt.assign_code
+data:
+  slot: 2
+  code: CELL-00417
+  apply_to_last_cycle: true
+```
+
+This only touches cycles that have no code, so a late scan can never
+overwrite an attribution that was already right. The event that already
+fired is unchanged — the relabel applies to the stored tail, so prefer
+scanning before the run when the record matters.
+
+---
+
+## Custom cell models
+
+The tester carries a built-in table of cells and stores up to **12 more** of
+your own, in its flash. Once stored they appear in every slot's model list,
+on the front panel and to any other host - not only in Home Assistant.
+
+List them in `lion_lvrt_models.yaml` in your Home Assistant config folder:
+
+```yaml
+models:
+  - name: VTC6A            # 1-7 characters: A-Z a-z 0-9 - _
+    chemistry: nmc         # lco lto lfp nmc nca none
+    capacity_mah: 3000     # required
+    manufacturer: Sony     # optional
+    charge_current_max_a: 6      # optional, 0 = chemistry default
+    discharge_current_max_a: 30  # optional
+    charge_v_max: 4.2            # optional, 0 = chemistry default
+    discharge_v_min: 2.5         # optional
+```
+
+The file is uploaded when the integration starts, and again on
+`lion_lvrt.sync_models`, which returns what it uploaded and any entry the
+tester refused. A model that already matches is not re-sent.
+
+* **Sync never deletes.** A model on the tester that is not in the file is
+  left alone - a slot may be using it. Remove one with
+  `lion_lvrt.delete_model`.
+* **A built-in's name is refused**, so `VTC6` always means Sony's figures.
+* **One bad entry does not stop the rest.** It is skipped and logged.
+
+Uploading needs proxy firmware with `BLE_PROTO_VERSION` 8 over Bluetooth, or
+the HTTP transport.
+
+---
+
 ## Calibration
 
 The bench procedure is in [`calibration-flow.md`](https://github.com/ArakniD/Lion-IRVT/tree/master/Hardware/source/Docs/calibration-flow.md).
@@ -266,11 +419,16 @@ custom_components/lion_lvrt/
     base.py           capability interface
     ble.py  can.py  http.py
   device.py         safety policy, transport selection
+  profile.py        per-slot cell profile entities
+  models_file.py    the custom cell models YAML
   coordinator.py    polling + notification fan-out
+  cycles.py         completed-cycle detection, no Home Assistant imports
+  assignments.py    cell codes per slot, and the recent cycle tail
   sensor.py  binary_sensor.py  select.py  button.py  number.py
   config_flow.py  services.py  const.py
 tests/
   simulator/        the fake unit
   test_protocol.py  test_registers.py  test_transport.py
-  test_device.py    test_homeassistant.py
+  test_device.py    test_homeassistant.py  test_models.py
+  test_cycles.py
 ```

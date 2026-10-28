@@ -39,6 +39,8 @@ from ..const import BleCommand, CalCommand, SLOT_COUNT
 from ..protocol import ble as proto
 from ..protocol.ble import (
     CalStatus,
+    CatalogEntry,
+    CellModel,
     ProtocolError,
     SlotConfig,
     SlotResult,
@@ -403,6 +405,53 @@ class BleTransport(Transport):
 
         self._cal = status
         return status
+
+
+    # --- cell model catalogue (proto 8 for writes) ------------------------
+
+    async def async_read_models(self) -> list[CellModel]:
+        """Page the catalogue (0008/0009) and keep the model entries.
+
+        The index and the entry are one shared cursor, so the walk runs under
+        the slot lock like any other select-then-read pair.
+        """
+        models: list[CellModel] = []
+        async with self._slot_lock:
+            index = 0
+            total = 1
+            while index < total and index < 255:
+                await self._write(proto.CATALOG_INDEX_UUID, bytes([index]))
+                entry = CatalogEntry.decode(await self._read(proto.CATALOG_ENTRY_UUID))
+                total = entry.total
+                if entry.is_model and entry.name:
+                    models.append(CellModel.from_catalog(entry))
+                index += 1
+        return models
+
+    def _require_model_char(self) -> None:
+        if not self.has_characteristic(proto.MODEL_UUID):
+            raise TransportError(
+                "this firmware has no cell-model characteristic; update the "
+                "proxy (BLE_PROTO_VERSION 8) or use the HTTP transport"
+            )
+
+    async def async_save_model(self, model: CellModel) -> None:
+        self._require_model_char()
+        try:
+            await self._write(proto.MODEL_UUID, model.encode_save())
+        except TransportError as err:
+            raise UnitRefusedError(
+                f"the tester refused model {model.name}: a built-in's name, the "
+                f"store full ({proto.CUSTOM_MODEL_MAX} max), or a figure out of "
+                f"range ({err})"
+            ) from err
+
+    async def async_delete_model(self, name: str) -> None:
+        self._require_model_char()
+        try:
+            await self._write(proto.MODEL_UUID, proto.encode_model_delete(name))
+        except TransportError as err:
+            raise UnitRefusedError(f"no custom model named {name} ({err})") from err
 
     # --- registers (proto 4 only) ----------------------------------------
 

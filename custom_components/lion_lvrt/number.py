@@ -12,6 +12,7 @@ operator sees the value that will actually be applied.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 from homeassistant.components.number import (
@@ -214,12 +215,19 @@ async def async_setup_entry(
 ) -> None:
     coordinator: LionCoordinator = hass.data[DOMAIN][entry.entry_id]
 
+    # The cell-profile numbers (capacity, C-rates) live on the proxy's test
+    # engine, not in the register file, so they need no register transport.
+    from .profile import profile_numbers  # noqa: PLC0415
+
+    profile = profile_numbers(coordinator)
+
     if not coordinator.device.supports_direct_mode:
         _LOGGER.info(
             "No register-capable transport configured, so the settings "
             "numbers are unavailable. Add the CAN or HTTP transport to edit "
             "slot limits from Home Assistant"
         )
+        async_add_entities(profile)
         return
 
     entities: list[NumberEntity] = [
@@ -229,7 +237,7 @@ async def async_setup_entry(
         entities.extend(
             LionSlotNumber(coordinator, slot, d) for d in SLOT_NUMBERS
         )
-    async_add_entities(entities, update_before_add=True)
+    async_add_entities([*entities, *profile])
 
 
 class _RegisterNumber(NumberEntity):
@@ -237,23 +245,67 @@ class _RegisterNumber(NumberEntity):
 
     The register file is not part of the coordinator's snapshot - it is far
     larger than anything polled at 1 Hz - so these entities read their own
-    value on demand and cache it.
+    value and cache it.
+
+    WHEN they read is the part that matters. These are CoordinatorEntity
+    subclasses, and a CoordinatorEntity has should_poll = False and an
+    async_update() that only asks the coordinator to refresh - so overriding
+    async_update() alone meant the read ran at most once, from
+    update_before_add, and then never again. A value that failed that one read
+    (the link not yet up at start-up, which is the usual case over BLE) stayed
+    unknown for good, and the fields never showed what the device held.
+
+    So the read is driven three ways: once when the entity is added, again
+    whenever the coordinator reports the link has come back, and at a slow
+    interval after that so a change made on the panel or by another host is
+    picked up.
     """
 
     _address: int
     _attr_native_value: float | None = None
 
+    #: How often to re-read once a value is held. The settings change only
+    #: when someone edits them, and every read is a register transaction on
+    #: the unit's bus, so this is deliberately slow.
+    _REFRESH_S: float = 60.0
+    _last_read: float = 0.0
+    _reading: bool = False
+
     @property
     def _coordinator(self) -> LionCoordinator:
         raise NotImplementedError
 
-    async def async_update(self) -> None:
+    async def _async_read(self) -> None:
+        if self._reading:
+            return
+        self._reading = True
         device = self._coordinator.device
         try:
             self._attr_native_value = await device.async_read_register(self._address)
+            self._last_read = time.monotonic()
         except TransportError as err:
             _LOGGER.debug("Could not read register %d: %s", self._address, err)
-            self._attr_native_value = None
+        finally:
+            self._reading = False
+
+    async def async_update(self) -> None:
+        await self._async_read()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if self._attr_native_value is None:
+            self.hass.async_create_task(self._async_read_and_write_state())
+
+    async def _async_read_and_write_state(self) -> None:
+        await self._async_read()
+        self.async_write_ha_state()
+
+    def _handle_coordinator_update(self) -> None:
+        """Re-read when the value is missing, or when it has gone stale."""
+        stale = (time.monotonic() - self._last_read) >= self._REFRESH_S
+        if (self._attr_native_value is None or stale) and self.available:
+            self.hass.async_create_task(self._async_read_and_write_state())
+        super()._handle_coordinator_update()
 
     async def async_set_native_value(self, value: float) -> None:
         device = self._coordinator.device
@@ -263,7 +315,7 @@ class _RegisterNumber(NumberEntity):
             raise HomeAssistantError(str(err)) from err
         # Read back rather than assume: a write to a register the target
         # considers read-only is silently discarded, not rejected.
-        await self.async_update()
+        await self._async_read()
         self.async_write_ha_state()
 
 

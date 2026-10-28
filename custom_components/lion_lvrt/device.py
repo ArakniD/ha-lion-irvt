@@ -34,7 +34,7 @@ from .const import (
     StatusBit,
 )
 from .protocol import registers as regs
-from .protocol.ble import CalStatus, SlotConfig, SlotResult, SlotStatus
+from .protocol.ble import CalStatus, CellModel, SlotConfig, SlotResult, SlotStatus
 from .transport.base import (
     DeviceSnapshot,
     Transport,
@@ -64,6 +64,12 @@ class LionDevice:
         self._slot_count = slot_count
         self._snapshot: DeviceSnapshot | None = None
         self._lock = asyncio.Lock()
+        #: Last configuration read from (or written to) each slot, and the
+        #: proxy's model catalogue. Neither is in the 1 Hz poll - both are
+        #: read on demand and cached - so the profile entities can show what
+        #: the device holds without a round trip per entity per poll.
+        self._configs: dict[int, SlotConfig] = {}
+        self._models: list[CellModel] = []
 
     # --- capability -------------------------------------------------------
 
@@ -338,11 +344,66 @@ class LionDevice:
 
     async def async_read_config(self, slot: int) -> SlotConfig:
         self._check_slot(slot)
-        return await self._engine().async_read_config(slot)
+        config = await self._engine().async_read_config(slot)
+        self._configs[slot] = config
+        return config
 
     async def async_write_config(self, config: SlotConfig) -> None:
         self._check_slot(config.slot)
         await self._engine().async_write_config(config)
+        # Read back: the proxy resolves and may adjust what it was given
+        # (a model brings its own chemistry), and the read is what is shown.
+        try:
+            await self.async_read_config(config.slot)
+        except TransportError:
+            self._configs[config.slot] = config
+
+    def cached_config(self, slot: int) -> SlotConfig | None:
+        return self._configs.get(slot)
+
+    # --- cell model catalogue ----------------------------------------------
+
+    @property
+    def models(self) -> list[CellModel]:
+        return list(self._models)
+
+    async def async_read_models(self) -> list[CellModel]:
+        self._models = await self._engine().async_read_models()
+        return self.models
+
+    async def async_save_model(self, model: CellModel) -> None:
+        await self._engine().async_save_model(model)
+        await self.async_read_models()
+
+    async def async_delete_model(self, name: str) -> None:
+        await self._engine().async_delete_model(name)
+        await self.async_read_models()
+
+    async def async_sync_models(self, wanted: list[CellModel]) -> tuple[int, list[str]]:
+        """Upload each model in ``wanted`` that the proxy lacks or holds differently.
+
+        Never deletes: a model on the proxy that is not in the list may be in
+        use by a slot or have been added from another host. Returns how many
+        were uploaded and a message per model the proxy refused.
+        """
+        current = {m.name.upper(): m for m in await self.async_read_models()}
+        uploaded = 0
+        problems: list[str] = []
+        for model in wanted:
+            have = current.get(model.name.upper())
+            if have is not None and not have.custom:
+                problems.append(f"{model.name}: same name as a built-in model, skipped")
+                continue
+            if have is not None and _same_model(have, model):
+                continue
+            try:
+                await self._engine().async_save_model(model)
+                uploaded += 1
+            except (TransportError, UnitRefusedError, ValueError) as err:
+                problems.append(f"{model.name}: {err}")
+        if uploaded:
+            await self.async_read_models()
+        return uploaded, problems
 
     async def async_read_result(self, slot: int) -> SlotResult:
         self._check_slot(slot)
@@ -435,3 +496,18 @@ _CAL_RESULT_HELP = {
     CalResult.ARG: "argument out of range",
     CalResult.NOT_ACTIVE: "the slot is not in the calibration state",
 }
+
+
+def _same_model(a: CellModel, b: CellModel) -> bool:
+    """Equal as the proxy stores them (floats to a hundredth)."""
+    def r(x: float) -> float:
+        return round(float(x), 2)
+    return (
+        a.chemistry == b.chemistry
+        and r(a.capacity_mah) == r(b.capacity_mah)
+        and r(a.charge_current_max_a) == r(b.charge_current_max_a)
+        and r(a.discharge_current_max_a) == r(b.discharge_current_max_a)
+        and r(a.charge_v_max) == r(b.charge_v_max)
+        and r(a.discharge_v_min) == r(b.discharge_v_min)
+        and a.manufacturer == b.manufacturer
+    )

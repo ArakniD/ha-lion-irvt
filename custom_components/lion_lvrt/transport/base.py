@@ -23,7 +23,14 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass
 
-from ..protocol.ble import CalStatus, SlotConfig, SlotResult, SlotStatus, UnitStatus
+from ..protocol.ble import (
+    CalStatus,
+    CellModel,
+    SlotConfig,
+    SlotResult,
+    SlotStatus,
+    UnitStatus,
+)
 
 
 class TransportError(Exception):
@@ -126,3 +133,16 @@ class Transport(abc.ABC):
         self, opcode: int, slot: int = 0, arg: float = 0.0
     ) -> CalStatus:
         raise TransportError(f"{type(self).__name__} cannot drive calibration")
+
+    # --- cell model catalogue, optional ------------------------------------
+
+    async def async_read_models(self) -> list[CellModel]:
+        """Every model the proxy knows: built-ins first, then custom ones."""
+        raise TransportError(f"{type(self).__name__} cannot read the catalogue")
+
+    async def async_save_model(self, model: CellModel) -> None:
+        """Add a custom model, or replace the custom model of that name."""
+        raise TransportError(f"{type(self).__name__} cannot store cell models")
+
+    async def async_delete_model(self, name: str) -> None:
+        raise TransportError(f"{type(self).__name__} cannot delete cell models")

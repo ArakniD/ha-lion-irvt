@@ -228,3 +228,172 @@ get_result:
       name: Tester
       selector:
         text:
+
+sync_models:
+  name: Sync cell models
+  description: >-
+    Upload the custom cell models listed in lion_lvrt_models.yaml (in the Home
+    Assistant config folder) to the tester. The tester stores up to 12, beside
+    its built-in models, and they then appear in every slot's model list and
+    on the front panel. Adds and updates only - a model not in the file is
+    left on the tester. Returns what was uploaded and any entries refused.
+  fields:
+    entry_id:
+      name: Tester
+      selector:
+        text:
+
+delete_model:
+  name: Delete cell model
+  description: >-
+    Remove a custom cell model from the tester. Built-in models cannot be
+    deleted. A slot still configured with the model comes up unconfigured at
+    the next restart.
+  fields:
+    entry_id:
+      name: Tester
+      selector:
+        text:
+    name:
+      name: Model name
+      description: The custom model to delete, e.g. VTC6A.
+      required: true
+      selector:
+        text:
+
+assign_code:
+  name: Assign code to slot
+  description: >-
+    Bind a scanned cell barcode to a slot. From then until the code is
+    replaced or cleared, every charge or discharge that finishes in that slot
+    is logged against it as a lion_lvrt_cycle_completed event. Scan the slot
+    label into slot_code and the cell barcode into code; on a bench with one
+    tester the slot number alone is enough.
+  fields:
+    slot_code:
+      name: Scanned slot label
+      description: >-
+        The barcode on the slot, e.g. e465b810d93a-3. Carries the tester's
+        Bluetooth address and the front-panel slot number, so no other field
+        is needed. Use 'slot' instead if your dashboard has a slot picker.
+      example: e465b810d93a-3
+      selector:
+        text:
+    code:
+      name: Cell code
+      description: The barcode scanned from the battery.
+      required: true
+      example: CELL-00417
+      selector:
+        text:
+    slot:
+      name: Slot
+      description: >-
+        Zero-based slot index, for a dashboard that picks rather than scans.
+        Overrides the slot in slot_code. Front-panel slot 3 is slot 2.
+      selector:
+        number:
+          min: 0
+          max: 7
+          mode: box
+    address:
+      name: Tester Bluetooth address
+      description: >-
+        Which tester, when more than one is configured and the slot code does
+        not name it. Separators and case are ignored.
+      example: e465b810d93a
+      selector:
+        text:
+    set_serial:
+      name: Also set the slot serial
+      description: >-
+        Send the code to the tester as the slot's serial, so it reaches the
+        unit's own stored result and the front panel. On by default. The
+        assignment is kept here even if the tester is unreachable.
+      selector:
+        boolean:
+    apply_to_last_cycle:
+      name: Apply to the last cycle
+      description: >-
+        For scanning the cell after the run instead of before: attach this
+        code to the slot's most recent cycle that has none. Never overwrites
+        a cycle that already carries a code.
+      selector:
+        boolean:
+    note:
+      name: Note
+      description: Free text stored with the assignment, e.g. the operator or batch.
+      selector:
+        text:
+    entry_id:
+      name: Tester
+      description: Required only when more than one tester is configured and no address is given.
+      selector:
+        text:
+
+clear_code:
+  name: Clear slot code
+  description: >-
+    Unbind the cell code from a slot. Cycles already logged keep the code
+    they were recorded with; cycles after this are logged with none.
+  fields:
+    slot_code:
+      name: Scanned slot label
+      example: e465b810d93a-3
+      selector:
+        text:
+    slot:
+      name: Slot
+      selector:
+        number:
+          min: 0
+          max: 7
+          mode: box
+    address:
+      name: Tester Bluetooth address
+      example: e465b810d93a
+      selector:
+        text:
+    entry_id:
+      name: Tester
+      selector:
+        text:
+
+get_cycles:
+  name: Get recent cycles
+  description: >-
+    Return the recent completed cycles this integration kept, newest first,
+    optionally filtered by slot or cell code. This is a bounded tail for
+    dashboards - the full history is in Home Assistant's recorder under the
+    lion_lvrt_cycle_completed event.
+  fields:
+    slot:
+      name: Slot
+      description: Only this slot's cycles.
+      selector:
+        number:
+          min: 0
+          max: 7
+          mode: box
+    code:
+      name: Cell code
+      description: Only cycles logged against this code.
+      selector:
+        text:
+    limit:
+      name: Limit
+      description: How many to return, newest first.
+      selector:
+        number:
+          min: 1
+          max: 200
+          mode: box
+    address:
+      name: Tester Bluetooth address
+      example: e465b810d93a
+      selector:
+        text:
+    entry_id:
+      name: Tester
+      selector:
+        text:
