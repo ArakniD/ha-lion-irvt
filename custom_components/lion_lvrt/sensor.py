@@ -138,7 +138,7 @@ SLOT_SENSORS: tuple[SlotSensorDescription, ...] = (
         options=[
             "none", "over_temp", "under_temp", "over_current", "cmpss_trip",
             "gpio_trip", "timeout", "bts_offline", "unit_state", "no_cell",
-            "cell_reversed", "comms",
+            "cell_reversed", "comms", "over_voltage", "disconnect",
         ],
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda s: s.fault.name.lower(),

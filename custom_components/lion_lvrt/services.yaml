@@ -40,7 +40,7 @@ configure_slot:
           mode: box
     charge_c:
       name: Charge C-rate
-      description: 0 uses the chemistry default.
+      description: 0 uses the chemistry default (NMC 1C).
       selector:
         number:
           min: 0
@@ -49,7 +49,7 @@ configure_slot:
           mode: box
     discharge_c:
       name: Discharge C-rate
-      description: 0 uses the chemistry default.
+      description: 0 uses the chemistry default (NMC 3C, capped at the unit's 8 A).
       selector:
         number:
           min: 0

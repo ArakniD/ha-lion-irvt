@@ -167,6 +167,12 @@ class SlotFault(IntEnum):
     NO_CELL = 9
     CELL_REVERSED = 10
     COMMS = 11
+    # A charge past the cell's charge_v_max: the engine's backstop for a CV
+    # loop that did not take over. Appended in proxy firmware after 1.1.0.
+    OVER_VOLTAGE = 12
+    # The unit stopped a running slot with group-disconnect set: its two
+    # voltage readings disagreed, or a group member strayed.
+    DISCONNECT = 13
 
 
 class CellChemistry(IntEnum):
@@ -321,7 +327,11 @@ class CalStatusBit(IntFlag):
 
 # Hardware envelope of the TIDA-010086 unit, from bts_regs.h. Any profile
 # asking for more than this is clamped before it reaches the BTS.
-UNIT_MAX_CURRENT_A: Final = 10.0
+#
+# The current is the highest SETPOINT the unit accepts - 8 A, below its 9 A
+# software over-current trip - not the sense chain's 10 A full scale. It was
+# 10 A, which let a slot regulate on top of the old 8 A trip and trip itself.
+UNIT_MAX_CURRENT_A: Final = 8.0
 UNIT_MAX_VOLTAGE_V: Final = 5.0
 
 # CAL_CMD_SET_FIXED_CURRENT is clamped to 0.0-0.8 pu (~8 A) on both the ESP32
